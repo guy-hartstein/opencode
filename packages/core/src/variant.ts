@@ -21,6 +21,15 @@ export function supports(reasoning: ConfigProvider.Reasoning): readonly Support[
   ]
 }
 
+/**
+ * The reasoning effort a variant sends, read from the setting the effort-update protocols use: Anthropic Messages
+ * `effort`, OpenAI Responses `reasoningEffort`. Thinking toggles and budgets set neither, even when named like an effort.
+ */
+export function effort(variant: Model.Info["variants"][number]) {
+  const value = variant.settings?.effort ?? variant.settings?.reasoningEffort
+  return typeof value === "string" ? value : undefined
+}
+
 type Variants = Model.Info["variants"]
 type Overlay = Omit<Variants[number], "id">
 

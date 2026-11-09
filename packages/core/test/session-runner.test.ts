@@ -77,7 +77,21 @@ import { SessionSystemPrompt } from "@opencode/core/session/system-prompt"
 import { ID, Model } from "@opencode/core/model"
 import { Location } from "@opencode/core/location"
 import { Provider } from "@opencode/core/provider"
-import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Scope, Stream, Tracer } from "effect"
+import {
+  Cause,
+  Context,
+  DateTime,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Queue,
+  Schema,
+  Scope,
+  Stream,
+  Tracer,
+} from "effect"
 import { TestClock } from "effect/testing"
 import { and, asc, desc, eq, sql } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -220,6 +234,7 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     }).pipe(Effect.andThen(Deferred.succeed(barrier.release, undefined)), Effect.asVoid)
   return {
     currentModel: model,
+    currentVariants: new Array<Model.Info["variants"][number]>(),
     compaction,
     modelResolveHook: resolvesModel,
     systemBaseline: "Initial context",
@@ -342,6 +357,7 @@ const layer = Layer.unwrap(
               cost: [],
               limit: modelLimits.get(String(selected.id)) ?? defaultModelLimit,
               variant: session.model?.variant,
+              variants: state.currentVariants,
               compaction: state.compaction,
             })
           }),
@@ -2333,6 +2349,7 @@ describe("SessionRunnerLLM", () => {
 
   scenario("records a same-model effort switch as a cache-preserving effort update", function* (s) {
     s.currentModel = LanguageModel.make({ id: "claude-opus-5", provider: "anthropic", route: AnthropicMessages.route })
+    s.currentVariants = ["high", "low"].map((effort) => ({ id: Model.VariantID.make(effort), settings: { effort } }))
     const model = { id: ID.make("claude-opus-5"), providerID: Provider.ID.make("anthropic") }
     yield* s.bus.publish(SessionEvent.ModelSelected, {
       sessionID,
@@ -2361,6 +2378,39 @@ describe("SessionRunnerLLM", () => {
         { role: "user" },
       ],
     })
+  })
+
+  scenario("switches a thinking-off variant to an effort without sending effort `none`", function* (s) {
+    s.currentModel = LanguageModel.make({
+      id: "claude-haiku-5-5",
+      provider: "anthropic",
+      route: AnthropicMessages.route,
+      options: { providerOptions: { thinking: { type: "disabled" } } },
+    })
+    s.currentVariants = [
+      { id: Model.VariantID.make("none"), settings: { thinking: { type: "disabled" } } },
+      { id: Model.VariantID.make("max"), settings: { thinking: { type: "adaptive" }, effort: "max" } },
+    ]
+    const model = { id: ID.make("claude-haiku-5-5"), providerID: Provider.ID.make("anthropic") }
+    yield* s.bus.publish(SessionEvent.ModelSelected, {
+      sessionID,
+      model: { ...model, variant: Model.VariantID.make("none") },
+    })
+    yield* s.llm.push(TestLLM.text("Earlier answer", "text-thinking-off"))
+    yield* s.runPrompt("First")
+    yield* s.bus.publish(SessionEvent.ModelSelected, {
+      sessionID,
+      model: { ...model, variant: Model.VariantID.make("max") },
+    })
+    s.currentModel = LanguageModel.update(s.currentModel, {
+      options: { providerOptions: { thinking: { type: "adaptive" }, effort: "max" } },
+    })
+    yield* s.llm.push(TestLLM.text("Later answer", "text-effort-max"))
+    yield* s.runPrompt("Second")
+
+    expect(messageRoles(s.requests[1])).toEqual(["user", "assistant", "user"])
+    const compiled = yield* compileRequest(s.requests[1]!)
+    expect(compiled.body.output_config).toEqual({ effort: "max" })
   })
 
   scenario("preserves instruction values while a source is temporarily unavailable", function* (s) {
